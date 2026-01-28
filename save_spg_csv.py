@@ -9,7 +9,7 @@ import os
 PORT = "COM8"          # đổi nếu COM khác
 BAUD = 115200
 
-OUTPUT_DIR = "Test"
+OUTPUT_DIR = "TestCSV"
 os.makedirs(OUTPUT_DIR, exist_ok=True)
 FILENAME = os.path.join(OUTPUT_DIR, "spg_data8.csv")
 
