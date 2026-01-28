@@ -10,7 +10,7 @@ HIGH_F = 2.5
 
 # Load CSV
 t, spg = [], []
-with open(os.path.join("TestCSV", "spg_data8.csv")) as f:
+with open(os.path.join("TestCSV", "spg_data9.csv")) as f:
     r = csv.reader(f)
     next(r)
     for row in r:
