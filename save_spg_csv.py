@@ -1,13 +1,17 @@
 import serial
 import csv
 import time
+import os
 
 # ===============================
 # CẤU HÌNH
 # ===============================
 PORT = "COM8"          # đổi nếu COM khác
 BAUD = 115200
-FILENAME = "spg_data8.csv"
+
+OUTPUT_DIR = "Test"
+os.makedirs(OUTPUT_DIR, exist_ok=True)
+FILENAME = os.path.join(OUTPUT_DIR, "spg_data8.csv")
 
 # ===============================
 # MỞ SERIAL (KHÔNG RESET ESP32)

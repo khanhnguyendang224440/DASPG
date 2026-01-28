@@ -2,6 +2,7 @@ import csv
 import numpy as np
 import matplotlib.pyplot as plt
 from scipy.signal import detrend
+import os
 
 FS = 50.0
 LOW_F = 0.8
@@ -9,7 +10,7 @@ HIGH_F = 2.5
 
 # Load CSV
 t, spg = [], []
-with open("spg_data7.csv") as f:
+with open(os.path.join("Test", "spg_data.8.csv")) as f:
     r = csv.reader(f)
     next(r)
     for row in r:

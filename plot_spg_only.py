@@ -1,7 +1,8 @@
 import csv
 import matplotlib.pyplot as plt
+import os
 
-CSV = "spg_data7.csv"
+CSV = os.path.join("Test", "spg_data8.csv")
 
 time = []
 spg  = []
