@@ -1,5 +1,6 @@
 #include "esp_camera.h"
 #include <Arduino.h>
+#include <math.h>
 
 /* =========================================================
    CAMERA PINS – ESP32-S3 N16R8 CAM
@@ -22,41 +23,113 @@
 #define PCLK_GPIO_NUM    13
 
 /* =========================================================
+   USER TUNING (VERY IMPORTANT FOR SPG)
+   ========================================================= */
+// 0 = keep camera auto (AEC/AGC)  -> dễ drift theo nhịp thở
+// 1 = lock exposure/gain (khuyến nghị) -> giảm drift, ổn định K(t)
+#define LOCK_AUTO_EXPOSURE_GAIN 1
+
+// Manual tuning (chỉ có tác dụng khi LOCK_AUTO_EXPOSURE_GAIN = 1)
+// Bạn sẽ cần tự tune 2 giá trị này để: ảnh KHÔNG cháy (255) và cũng không quá tối.
+static int CAM_AEC_VALUE = 250; // exposure (thử: 150~600)
+static int CAM_AGC_GAIN  = 3;   // gain     (thử: 0~10)
+
+// Debug sáng/bão hoà (0 = tắt để CSV sạch)
+#define DEBUG_CAM 0
+
+/* =========================================================
    ROI + FILTER PARAMETERS
    ========================================================= */
 const int ROI = 64;          // ROI 64x64
-const float hp_alpha = 0.95; // high-pass strength
-#define MA_N 5               // moving average length
+
+// High-pass cutoff (Hz): suppress breathing (0.1–0.4 Hz) while keeping HR band.
+// Recommended range: 0.5–0.7 Hz
+const float FC_HP = 0.7f;
+
+// Optional low-pass cutoff (Hz): suppress high-frequency noise while keeping HR.
+// Recommended range: 2.5–4.0 Hz
+const float FC_LP = 3.0f;
+
+// Moving average window: keep small so HR is not attenuated.
+// Recommended: 3–7 samples (at ~25 Hz)
+#define MA_N 3
 
 /* =========================================================
    FILTER STATES
    ========================================================= */
-float K_prev = 0;
-float K_hp = 0;
+static float x_prev = 0.0f;   // previous input (for HPF)
+static float hp_prev = 0.0f;  // previous HPF output
+static float lp_prev = 0.0f;  // previous LPF output
 
-float ma_buf[MA_N];
-int ma_idx = 0;
+static float ma_buf[MA_N] = {0};
+static int   ma_idx = 0;
+static float ma_sum = 0.0f;
 
 /* =========================================================
-   HIGH-PASS FILTER (remove DC / slow drift)
+   1st-ORDER HIGH-PASS FILTER (remove breathing + slow drift)
+   y[n] = alpha * (y[n-1] + x[n] - x[n-1])
+   alpha = RC / (RC + dt), RC = 1/(2*pi*fc)
    ========================================================= */
-float highpass(float x) {
-  float y = hp_alpha * (K_hp + x - K_prev);
-  K_prev = x;
-  K_hp = y;
+static inline float highpass_1st(float x, float dt) {
+  float RC = 1.0f / (2.0f * 3.1415926f * FC_HP);
+  float alpha = RC / (RC + dt);
+  float y = alpha * (hp_prev + x - x_prev);
+  x_prev = x;
+  hp_prev = y;
   return y;
 }
 
 /* =========================================================
-   MOVING AVERAGE (low-pass smoothing)
+   1st-ORDER LOW-PASS FILTER (optional smoothing)
+   y[n] = y[n-1] + beta * (x[n] - y[n-1])
+   beta = dt / (RC + dt), RC = 1/(2*pi*fc)
    ========================================================= */
-float movingAverage(float x) {
-  ma_buf[ma_idx] = x;
-  ma_idx = (ma_idx + 1) % MA_N;
+static inline float lowpass_1st(float x, float dt) {
+  float RC = 1.0f / (2.0f * 3.1415926f * FC_LP);
+  float beta = dt / (RC + dt);
+  lp_prev = lp_prev + beta * (x - lp_prev);
+  return lp_prev;
+}
 
-  float sum = 0;
-  for (int i = 0; i < MA_N; i++) sum += ma_buf[i];
-  return sum / MA_N;
+/* =========================================================
+   MOVING AVERAGE (small window, running-sum)
+   ========================================================= */
+static inline float movingAverage(float x) {
+  ma_sum -= ma_buf[ma_idx];
+  ma_buf[ma_idx] = x;
+  ma_sum += x;
+  ma_idx = (ma_idx + 1) % MA_N;
+  return ma_sum / MA_N;
+}
+
+/* =========================================================
+   APPLY CAMERA SENSOR SETTINGS (lock exposure/gain)
+   ========================================================= */
+static void apply_sensor_settings() {
+  sensor_t *s = esp_camera_sensor_get();
+  if (!s) return;
+
+  // Ensure expected format/size (driver-level)
+  if (s->set_pixformat) s->set_pixformat(s, PIXFORMAT_GRAYSCALE);
+  if (s->set_framesize) s->set_framesize(s, FRAMESIZE_QQVGA);
+
+#if LOCK_AUTO_EXPOSURE_GAIN
+  // Turn OFF auto controllers to reduce low-frequency drift in mean brightness
+  if (s->set_gain_ctrl)     s->set_gain_ctrl(s, 0);      // AGC off
+  if (s->set_exposure_ctrl) s->set_exposure_ctrl(s, 0);  // AEC off
+
+  // Optional: reduce auto color features (even in grayscale, some pipelines still change)
+  if (s->set_whitebal)  s->set_whitebal(s, 0);
+  if (s->set_awb_gain)  s->set_awb_gain(s, 0);
+
+  // Apply manual values (tune these!)
+  if (s->set_agc_gain)  s->set_agc_gain(s, CAM_AGC_GAIN);
+  if (s->set_aec_value) s->set_aec_value(s, CAM_AEC_VALUE);
+
+  // Keep neutral image processing
+  if (s->set_brightness) s->set_brightness(s, 0);
+  if (s->set_contrast)   s->set_contrast(s, 0);
+#endif
 }
 
 /* =========================================================
@@ -65,7 +138,9 @@ float movingAverage(float x) {
 void setup() {
   Serial.begin(115200);
   delay(2000);
-  Serial.println("time_s,K_filt");   // CSV header
+
+  // CSV header (keep clean for Python)
+  Serial.println("time_s,K_filt");
 
   camera_config_t config;
   config.ledc_channel = LEDC_CHANNEL_0;
@@ -99,12 +174,23 @@ void setup() {
     Serial.printf("Camera init failed: %s\n", esp_err_to_name(err));
     while (1);
   }
+
+  // Apply sensor settings (lock AEC/AGC to reduce drift)
+  apply_sensor_settings();
 }
 
 /* =========================================================
    LOOP
    ========================================================= */
 void loop() {
+  // --- dt measurement (more robust filters than fixed alpha) ---
+  static uint32_t last_us = micros();
+  uint32_t now_us = micros();
+  float dt = (now_us - last_us) / 1e6f;
+  last_us = now_us;
+  // fallback if a stall happens
+  if (dt <= 0.0f || dt > 0.2f) dt = 0.04f;
+
   camera_fb_t* fb = esp_camera_fb_get();
   if (!fb) return;
 
@@ -120,16 +206,24 @@ void loop() {
   float sum_sq = 0;
   int count = ROI * ROI;
 
+#if DEBUG_CAM
+  uint8_t max_px = 0;
+#endif
+
   for (int y = 0; y < ROI; y++) {
     int row = (y0 + y) * w;
     for (int x = 0; x < ROI; x++) {
       uint8_t px = img[row + (x0 + x)];
       sum    += px;
       sum_sq += px * px;
+#if DEBUG_CAM
+      if (px > max_px) max_px = px;
+#endif
     }
   }
 
   float mean = sum / count;
+  if (mean < 1.0f) mean = 1.0f; // avoid divide-by-zero/extreme noise
   float var  = (sum_sq / count) - (mean * mean);
   if (var < 0) var = 0;
   float std  = sqrtf(var);
@@ -138,8 +232,23 @@ void loop() {
   float K_raw = std / mean;
 
   // ---- Filtering ----
-  float K_hp_out = highpass(K_raw);
-  float K_filt   = movingAverage(K_hp_out);
+  // Warm-up: skip first few seconds so filter transients don't pollute the log
+  static int warmup = 0;
+  warmup++;
+  if (warmup < (int)(25 * 5)) { // ~5 s at ~25 Hz
+    esp_camera_fb_return(fb);
+    delay(40);
+    return;
+  }
+
+  // HPF to suppress breathing/slow drift
+  float k_hp = highpass_1st(K_raw, dt);
+
+  // Optional LPF to suppress high-frequency noise
+  float k_lp = lowpass_1st(k_hp, dt);
+
+  // Small moving average
+  float K_filt = movingAverage(k_lp);
 
   // ---- Time ----
   static unsigned long t0 = millis();
@@ -149,6 +258,17 @@ void loop() {
   Serial.print(t, 4);
   Serial.print(",");
   Serial.println(K_filt, 6);
+
+#if DEBUG_CAM
+  // WARNING: debug line will break strict CSV. Keep DEBUG_CAM=0 for real logging.
+  static int dbg = 0;
+  if ((++dbg % 50) == 0) {
+    Serial.print("# mean=");
+    Serial.print(mean, 1);
+    Serial.print(" max=");
+    Serial.println((int)max_px);
+  }
+#endif
 
   esp_camera_fb_return(fb);
   delay(40);   // ~25 Hz
