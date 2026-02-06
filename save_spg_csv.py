@@ -11,7 +11,7 @@ BAUD = 115200
 
 OUTPUT_DIR = "TestCSV"
 os.makedirs(OUTPUT_DIR, exist_ok=True)
-FILENAME = os.path.join(OUTPUT_DIR, "spg_data16.csv")
+FILENAME = os.path.join(OUTPUT_DIR, "spg_data26.csv")
 
 # ===============================
 # MỞ SERIAL (KHÔNG RESET ESP32)

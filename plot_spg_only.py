@@ -3,7 +3,7 @@ import numpy as np
 import matplotlib.pyplot as plt
 import os
 
-CSV = os.path.join("TestCSV", "spg_data14.csv")
+CSV = os.path.join("TestCSV", "spg_data25.csv")
 
 time = []
 spg  = []
